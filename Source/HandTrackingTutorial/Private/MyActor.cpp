@@ -1,8 +1,9 @@
 #include "MyActor.h"
 #include "Async/Async.h"
+#include "HAL/RunnableThread.h"
 
 // Sets default values
-AMyActor::AMyActor() : vec(0)
+AMyActor::AMyActor() : ReceivedPosition(0), bThreadRunning(false)
 {
 	// Set this actor to call Tick() every frame.  You can turn this off to improve performance if you don't need it.
 	PrimaryActorTick.bCanEverTick = true;
@@ -13,23 +14,39 @@ void AMyActor::BeginPlay()
 {
 	Super::BeginPlay();
 
-	InitializeSocket();
+	// Create a UDP socket
+	Socket = FUdpSocketBuilder(TEXT("UDPSocket"))
+		.AsNonBlocking()
+		.AsReusable()
+		.BoundToAddress(FIPv4Address::Any)
+		.BoundToPort(ReceivePort)
+		.WithReceiveBufferSize(1024);
 
-	//// Start the data receiving thread
-	//AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask, [this]()
-	//{
-	//	while (true)
-	//	{
-	//		ReceiveData();
-	//		FPlatformProcess::Sleep(0.001f); // Sleep for 1ms to achieve ~1kHz
-	//	}
-	//});
+	// Check if the socket was created successfully
+	if (!Socket)
+	{
+		UE_LOG(LogTemp, Error, TEXT("Failed to create UDP socket"));
+		return;
+	}
+
+	// Start the data receiving thread
+	bThreadRunning.store(true);
+	AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask, [this]()
+	{
+		while (bThreadRunning.load())
+		{
+			ReceiveData();
+			FPlatformProcess::Sleep(0.001f); // Sleep for 1ms to achieve ~1kHz
+		}
+	});
 
 	UE_LOG(LogTemp, Log, TEXT("MyActor BeginPlay"));
 }
 
 void AMyActor::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
+	bThreadRunning = false;
+
 	if (Socket)
 	{
 		Socket->Close();
@@ -40,33 +57,6 @@ void AMyActor::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	Super::EndPlay(EndPlayReason);
 }
 
-// Called every frame
-void AMyActor::Tick(float DeltaTime)
-{
-	Super::Tick(DeltaTime);
-
-	// Other Tick related code
-	ReceiveData();
-}
-
-void AMyActor::InitializeSocket()
-{
-	// Create a UDP socket
-	Socket = FUdpSocketBuilder(TEXT("UDPSocket"))
-		.AsNonBlocking()
-		.AsReusable()
-		.BoundToAddress(FIPv4Address::Any)
-		.BoundToPort(23456)
-		.WithReceiveBufferSize(1024);
-
-	// Check if the socket was created successfully
-	if (!Socket)
-	{
-		UE_LOG(LogTemp, Error, TEXT("Failed to create UDP socket"));
-		return;
-	}
-}
-
 void AMyActor::ReceiveData()
 {
 	if (!Socket)
@@ -74,8 +64,8 @@ void AMyActor::ReceiveData()
 		return;
 	}
 
-	TArray<uint8> ReceivedData;
 	uint32 Size;
+	TArray<uint8> ReceivedData;
 	while (Socket->HasPendingData(Size))
 	{
 		ReceivedData.SetNumUninitialized(FMath::Min(Size, 65507u));
@@ -100,12 +90,18 @@ void AMyActor::ReceiveData()
 			// Process the values
 			UE_LOG(LogTemp, Log, TEXT("Received values: %f, %f, %f"), Value1, Value2, Value3);
 
-			// meter to centimeter, and reverse y axis
-			vec = FVector(100 * Value1, -100 * Value2, 100 * Value3);
+			// parsing coordinate system: meter to centimeter, and reverse y axis
+			FScopeLock Lock(&ReceiveMutex);
+			ReceivedPosition = FVector(100 * Value1, -100 * Value2, 100 * Value3);
 		}
 	}
 }
 
+FVector AMyActor::GetReceivedPosition() const
+{
+	FScopeLock Lock(&ReceiveMutex);
+	return ReceivedPosition;
+}
 
 void AMyActor::SendData(const FVector& Data, const int32& Mode)
 {
@@ -134,17 +130,19 @@ void AMyActor::SendData(const FVector& Data, const int32& Mode)
     SendData[26] = 0;
     SendData[27] = (uint8)Mode;
 
+	TSharedRef<FInternetAddr> RemoteAddr = ISocketSubsystem::Get(PLATFORM_SOCKETSUBSYSTEM)->CreateInternetAddr();
+
+	bool bIsValid;
+	RemoteAddr->SetIp(*RemoteAddrString, bIsValid);
+	if (!bIsValid)
+	{
+		UE_LOG(LogTemp, Error, TEXT("Invalid IP address"));
+		return;
+	}
+	RemoteAddr->SetPort(SendPort);
+
     int32 BytesSent = 0;
-
-    // Create destination address
-    TSharedRef<FInternetAddr> DestinationAddr = ISocketSubsystem::Get(PLATFORM_SOCKETSUBSYSTEM)->CreateInternetAddr();
-    
-	FIPv4Address ip(192, 168, 0, 6);	// to client PC (ROS2)
-
-    DestinationAddr->SetIp(ip.Value);
-    DestinationAddr->SetPort(12345);
-
-    Socket->SendTo(SendData.GetData(), SendData.Num(), BytesSent, *DestinationAddr);
+    Socket->SendTo(SendData.GetData(), SendData.Num(), BytesSent, *RemoteAddr);
 
     if (BytesSent != SendData.Num())
     {

@@ -23,20 +23,29 @@ protected:
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 
 public:	
-	// Called every frame
-	virtual void Tick(float DeltaTime) override;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MyActor")
+	FString RemoteAddrString;
 
-	// Create 3d vector with double dtype that exposed to blueprint interface
-	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Vector")
-	FVector vec;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MyActor")
+	int32 ReceivePort;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MyActor")
+	int32 SendPort;
 
 	// Create a function that exposed to blueprint interface
-	UFUNCTION(BlueprintCallable, Category = "Vector")
+	UFUNCTION(BlueprintCallable, Category = "MyActor")
 	void SendData(const FVector& NewVector, const int32& mode);
 
+	UFUNCTION(BlueprintCallable, Category = "MyActor")
+	FVector GetReceivedPosition() const;
+
 private:
-	void InitializeSocket();
 	void ReceiveData();
 
 	FSocket* Socket;
+
+	std::atomic<bool> bThreadRunning;
+	mutable FCriticalSection ReceiveMutex;
+
+	FVector ReceivedPosition;
 };

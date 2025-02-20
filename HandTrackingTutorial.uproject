@@ -50,6 +50,7 @@
 		}
 	],
 	"TargetPlatforms": [
-		"Windows"
+		"Windows",
+		"Android"
 	]
 }
